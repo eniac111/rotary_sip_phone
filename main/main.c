@@ -13,7 +13,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
-#include "esp_sip/include/esp_sip.h"
+#include "esp_sip.h"
 
 #define PULSE_GPIO GPIO_NUM_4
 #define HOOK_GPIO GPIO_NUM_5
