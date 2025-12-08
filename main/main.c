@@ -13,7 +13,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
-#include "esp_sip.h"
+#include "esp_rtc.h"
 
 #define PULSE_GPIO GPIO_NUM_4
 #define HOOK_GPIO GPIO_NUM_5
@@ -24,7 +24,7 @@ static const char *TAG = "ROTARY_SIP";
 static EventGroupHandle_t s_wifi_event_group;
 static QueueHandle_t s_digit_queue;
 static esp_timer_handle_t s_rotary_timer;
-static sip_handle_t s_sip_handle;
+static esp_rtc_handle_t s_rtc_handle;
 
 typedef struct {
     char wifi_ssid[33];
@@ -41,28 +41,27 @@ static volatile bool s_hook_lifted = false;
 static volatile uint64_t s_last_pulse_time = 0;
 static volatile bool s_sip_registered = false;
 
-static int sip_event_handler(sip_event_msg_t *event) {
-    switch (event->type) {
-        case SIP_EVENT_REGISTERED:
+static int rtc_event_handler(esp_rtc_event_t event, void *ctx) {
+    (void)ctx;
+    switch (event) {
+        case ESP_RTC_EVENT_REGISTERED:
             s_sip_registered = true;
             ESP_LOGI(TAG, "SIP registered");
             break;
-        case SIP_EVENT_UNREGISTERED:
+        case ESP_RTC_EVENT_UNREGISTERED:
             s_sip_registered = false;
             ESP_LOGW(TAG, "SIP unregistered");
             break;
-        case SIP_EVENT_RINGING:
-            ESP_LOGI(TAG, "Incoming call from %s", (char *)event->data);
+        case ESP_RTC_EVENT_INCOMING:
+            ESP_LOGI(TAG, "Incoming call");
             break;
-        case SIP_EVENT_AUDIO_SESSION_BEGIN:
+        case ESP_RTC_EVENT_AUDIO_SESSION_BEGIN:
             ESP_LOGI(TAG, "SIP audio session started");
             break;
-        case SIP_EVENT_AUDIO_SESSION_END:
+        case ESP_RTC_EVENT_AUDIO_SESSION_END:
+        case ESP_RTC_EVENT_HANGUP:
             ESP_LOGI(TAG, "SIP audio session ended");
             break;
-        case SIP_EVENT_WRITE_AUDIO_DATA:
-        case SIP_EVENT_READ_AUDIO_DATA:
-            return 0;
         default:
             break;
     }
@@ -104,15 +103,14 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         esp_wifi_connect();
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-        if (s_sip_handle) {
-            esp_sip_stop(s_sip_handle);
-            esp_sip_destroy(s_sip_handle);
-            s_sip_handle = NULL;
+        if (s_rtc_handle) {
+            esp_rtc_service_deinit(s_rtc_handle);
+            s_rtc_handle = NULL;
             s_sip_registered = false;
         }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        if (s_sip_handle == NULL && s_config.sip_user[0] && s_config.sip_domain[0]) {
+        if (s_rtc_handle == NULL && s_config.sip_user[0] && s_config.sip_domain[0]) {
             wifi_ap_record_t ap_info = {0};
             if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
                 ESP_LOGI(TAG, "WiFi connected to %s, starting SIP", (char *)ap_info.ssid);
@@ -120,20 +118,21 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
             char sip_uri[196];
             const char *user = s_config.sip_extension[0] ? s_config.sip_extension : s_config.sip_user;
             if (s_config.sip_pass[0]) {
-                snprintf(sip_uri, sizeof(sip_uri), "sip:%s:%s@%s", s_config.sip_user, s_config.sip_pass, s_config.sip_domain);
+                snprintf(sip_uri, sizeof(sip_uri), "sip://%s:%s@%s", s_config.sip_user, s_config.sip_pass, s_config.sip_domain);
             } else {
-                snprintf(sip_uri, sizeof(sip_uri), "sip:%s@%s", s_config.sip_user, s_config.sip_domain);
+                snprintf(sip_uri, sizeof(sip_uri), "sip://%s@%s", s_config.sip_user, s_config.sip_domain);
             }
 
-            sip_config_t sip_cfg = {
+            esp_rtc_config_t rtc_cfg = {
+                .ctx = NULL,
                 .uri = sip_uri,
-                .event_handler = sip_event_handler,
-                .acodec_type = SIP_ACODEC_G711U,
+                .acodec_type = RTC_ACODEC_G711U,
+                .data_cb = NULL,
+                .event_handler = rtc_event_handler,
             };
 
-            s_sip_handle = esp_sip_init(&sip_cfg);
-            if (s_sip_handle) {
-                esp_sip_start(s_sip_handle);
+            s_rtc_handle = esp_rtc_service_init(&rtc_cfg);
+            if (s_rtc_handle) {
                 ESP_LOGI(TAG, "SIP client started for %s", user);
             } else {
                 ESP_LOGE(TAG, "Failed to initialize SIP");
@@ -171,7 +170,7 @@ static void wifi_start_softap(void) {
 }
 
 static void sip_place_call(const char *number) {
-    if (!s_sip_handle) {
+    if (!s_rtc_handle) {
         ESP_LOGW(TAG, "SIP handle not ready; cannot place call to %s", number);
         return;
     }
@@ -187,7 +186,7 @@ static void sip_place_call(const char *number) {
         strlcpy(target, number, sizeof(target));
     }
     ESP_LOGI(TAG, "Dialing %s via SIP user %s@%s", target, s_config.sip_user, s_config.sip_domain);
-    esp_sip_uac_invite(s_sip_handle, target);
+    esp_rtc_call(s_rtc_handle, target);
 }
 
 static void rotary_timeout(void *arg) {
@@ -313,10 +312,9 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     parse_field(buf, "sip_domain", s_config.sip_domain, sizeof(s_config.sip_domain));
     parse_field(buf, "sip_extension", s_config.sip_extension, sizeof(s_config.sip_extension));
     save_config();
-    if (s_sip_handle) {
-        esp_sip_stop(s_sip_handle);
-        esp_sip_destroy(s_sip_handle);
-        s_sip_handle = NULL;
+    if (s_rtc_handle) {
+        esp_rtc_service_deinit(s_rtc_handle);
+        s_rtc_handle = NULL;
         s_sip_registered = false;
     }
     wifi_start_sta();

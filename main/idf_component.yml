@@ -1,2 +1,2 @@
 dependencies:
-  espressif/esp_sip: "^1.0.4"
+  espressif/esp_media_protocols: "0.5.1"
