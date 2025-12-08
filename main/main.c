@@ -281,6 +281,12 @@ static void send_form(httpd_req_t *req) {
     httpd_resp_send(req, buffer, HTTPD_RESP_USE_STRLEN);
 }
 
+static void restart_task(void *param) {
+    (void)param;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+
 static void parse_field(const char *body, const char *key, char *out, size_t out_len) {
     char needle[32];
     snprintf(needle, sizeof(needle), "%s=", key);
@@ -334,10 +340,17 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         s_rtc_handle = NULL;
         s_sip_registered = false;
     }
-    wifi_start_sta();
-    httpd_resp_set_hdr(req, "Location", "/");
-    httpd_resp_set_status(req, "303 See Other");
-    httpd_resp_send(req, "", 0);
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "Configuration saved. Rebooting to apply settings...\n");
+
+    xTaskCreate(
+        restart_task,
+        "restart_task",
+        2048,
+        NULL,
+        tskIDLE_PRIORITY,
+        NULL);
     return ESP_OK;
 }
 
