@@ -21,6 +21,8 @@ Firmware skeleton for embedding an ESP32-ADF inside a rotary phone to operate as
    idf.py -p /dev/ttyUSB0 flash monitor
    ```
 
+If you plan to add custom drivers or SIP stacks, drop them into the `components/` directory referenced by `EXTRA_COMPONENT_DIRS` in the top-level `CMakeLists.txt`.
+
 ## Hardware Wiring (defaults in `main/main.c`)
 - Rotary pulse output -> GPIO4 (falling-edge pulses counted).
 - Hook switch -> GPIO5 (high when handset lifted).
