@@ -67,38 +67,32 @@ static void load_config(void) {
     }
 }
 
-static esp_err_t wifi_event_handler(void *ctx, system_event_t *event) {
-    switch (event->event_id) {
-        case SYSTEM_EVENT_STA_START:
-            esp_wifi_connect();
-            break;
-        case SYSTEM_EVENT_STA_DISCONNECTED:
-            esp_wifi_connect();
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-            break;
-        case SYSTEM_EVENT_STA_GOT_IP:
-            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-            break;
-        default:
-            break;
+static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        esp_wifi_connect();
+        xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
-    return ESP_OK;
 }
 
 static void wifi_init_sta(void) {
     s_wifi_event_group = xEventGroupCreate();
-    tcpip_adapter_init();
-    ESP_ERROR_CHECK(esp_event_loop_init(wifi_event_handler, NULL));
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
 
     wifi_config_t wifi_config = { 0 };
     strlcpy((char *)wifi_config.sta.ssid, s_config.wifi_ssid, sizeof(wifi_config.sta.ssid));
     strlcpy((char *)wifi_config.sta.password, s_config.wifi_pass, sizeof(wifi_config.sta.password));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "wifi_init_sta finished. SSID:%s", s_config.wifi_ssid);
 }
@@ -215,10 +209,14 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Payload too large");
         return ESP_FAIL;
     }
-    int received = httpd_req_recv(req, buf, total_len);
-    if (received <= 0) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read body");
-        return ESP_FAIL;
+    int received = 0;
+    while (received < total_len) {
+        int ret = httpd_req_recv(req, buf + received, total_len - received);
+        if (ret <= 0) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to read body");
+            return ESP_FAIL;
+        }
+        received += ret;
     }
     parse_field(buf, "wifi_ssid", s_config.wifi_ssid, sizeof(s_config.wifi_ssid));
     parse_field(buf, "wifi_pass", s_config.wifi_pass, sizeof(s_config.wifi_pass));
@@ -269,7 +267,6 @@ static void dial_task(void *pvParameters) {
                 ESP_LOGI(TAG, "Digit: %d, number: %s", digit, dialed_number);
             }
             // simple timeout to dial after 2 seconds idle
-            TickType_t start = xTaskGetTickCount();
             while (xQueuePeek(s_digit_queue, &digit, pdMS_TO_TICKS(2000)) != pdTRUE) {
                 if (pos > 0 && s_hook_lifted) {
                     sip_place_call(dialed_number);
@@ -283,14 +280,26 @@ static void dial_task(void *pvParameters) {
 }
 
 static void app_start(void) {
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    }
+
     load_config();
-    ESP_ERROR_CHECK(nvs_flash_init());
+
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_t *netif = esp_netif_create_default_wifi_sta();
+    if (!netif) {
+        ESP_LOGE(TAG, "Failed to create default WIFI STA");
+        return;
+    }
+
+    s_digit_queue = xQueueCreate(16, sizeof(int));
     rotary_init();
     start_webserver();
     wifi_init_sta();
-    s_digit_queue = xQueueCreate(16, sizeof(int));
     xTaskCreate(&dial_task, "dial_task", 4096, NULL, 5, NULL);
 }
 

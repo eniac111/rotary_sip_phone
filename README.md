@@ -9,7 +9,14 @@ Firmware skeleton for embedding an ESP32-ADF inside a rotary phone to operate as
 - FreeRTOS task to buffer dialed numbers and trigger SIP calls (stub for integration with ESP-ADF/PJSIP).
 
 ## Building
-1. Install [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html) and set `IDF_PATH` in your shell.
+1. Install [ESP-IDF](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/index.html) (the repo includes a known-good clone in `/workspace/esp-idf` if you followed the setup from this branch):
+   ```bash
+   git clone --recursive https://github.com/espressif/esp-idf.git
+   cd esp-idf
+   ./install.sh esp32
+   source export.sh
+   ```
+   Ensure `IDF_PATH` points to the cloned directory (for example, `/workspace/esp-idf`).
 2. From this repository root, run:
    ```bash
    idf.py set-target esp32
