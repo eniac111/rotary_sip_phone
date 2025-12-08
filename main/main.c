@@ -115,12 +115,20 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
             if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
                 ESP_LOGI(TAG, "WiFi connected to %s, starting SIP", (char *)ap_info.ssid);
             }
-            char sip_uri[196];
+            char sip_uri[256];
             const char *user = s_config.sip_extension[0] ? s_config.sip_extension : s_config.sip_user;
             if (s_config.sip_pass[0]) {
-                snprintf(sip_uri, sizeof(sip_uri), "sip://%s:%s@%s", user, s_config.sip_pass, s_config.sip_domain);
+                int written = snprintf(sip_uri, sizeof(sip_uri), "sip://%s:%s@%s", user, s_config.sip_pass, s_config.sip_domain);
+                if (written < 0 || written >= (int)sizeof(sip_uri)) {
+                    ESP_LOGE(TAG, "SIP URI too long");
+                    return;
+                }
             } else {
-                snprintf(sip_uri, sizeof(sip_uri), "sip://%s@%s", user, s_config.sip_domain);
+                int written = snprintf(sip_uri, sizeof(sip_uri), "sip://%s@%s", user, s_config.sip_domain);
+                if (written < 0 || written >= (int)sizeof(sip_uri)) {
+                    ESP_LOGE(TAG, "SIP URI too long");
+                    return;
+                }
             }
 
             esp_rtc_config_t rtc_cfg = {
