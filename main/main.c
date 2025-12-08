@@ -13,6 +13,7 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
+#include "esp_sip/include/esp_sip.h"
 
 #define PULSE_GPIO GPIO_NUM_4
 #define HOOK_GPIO GPIO_NUM_5
@@ -23,6 +24,7 @@ static const char *TAG = "ROTARY_SIP";
 static EventGroupHandle_t s_wifi_event_group;
 static QueueHandle_t s_digit_queue;
 static esp_timer_handle_t s_rotary_timer;
+static sip_handle_t s_sip_handle;
 
 typedef struct {
     char wifi_ssid[33];
@@ -37,6 +39,35 @@ static app_config_t s_config;
 static volatile int s_pulse_count = 0;
 static volatile bool s_hook_lifted = false;
 static volatile uint64_t s_last_pulse_time = 0;
+static volatile bool s_sip_registered = false;
+
+static int sip_event_handler(sip_event_msg_t *event) {
+    switch (event->type) {
+        case SIP_EVENT_REGISTERED:
+            s_sip_registered = true;
+            ESP_LOGI(TAG, "SIP registered");
+            break;
+        case SIP_EVENT_UNREGISTERED:
+            s_sip_registered = false;
+            ESP_LOGW(TAG, "SIP unregistered");
+            break;
+        case SIP_EVENT_RINGING:
+            ESP_LOGI(TAG, "Incoming call from %s", (char *)event->data);
+            break;
+        case SIP_EVENT_AUDIO_SESSION_BEGIN:
+            ESP_LOGI(TAG, "SIP audio session started");
+            break;
+        case SIP_EVENT_AUDIO_SESSION_END:
+            ESP_LOGI(TAG, "SIP audio session ended");
+            break;
+        case SIP_EVENT_WRITE_AUDIO_DATA:
+        case SIP_EVENT_READ_AUDIO_DATA:
+            return 0;
+        default:
+            break;
+    }
+    return 0;
+}
 
 static void save_config(void) {
     nvs_handle_t nvs;
@@ -73,8 +104,41 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         esp_wifi_connect();
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        if (s_sip_handle) {
+            esp_sip_stop(s_sip_handle);
+            esp_sip_destroy(s_sip_handle);
+            s_sip_handle = NULL;
+            s_sip_registered = false;
+        }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        if (s_sip_handle == NULL && s_config.sip_user[0] && s_config.sip_domain[0]) {
+            wifi_ap_record_t ap_info = {0};
+            if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+                ESP_LOGI(TAG, "WiFi connected to %s, starting SIP", (char *)ap_info.ssid);
+            }
+            char sip_uri[196];
+            const char *user = s_config.sip_extension[0] ? s_config.sip_extension : s_config.sip_user;
+            if (s_config.sip_pass[0]) {
+                snprintf(sip_uri, sizeof(sip_uri), "sip:%s:%s@%s", s_config.sip_user, s_config.sip_pass, s_config.sip_domain);
+            } else {
+                snprintf(sip_uri, sizeof(sip_uri), "sip:%s@%s", s_config.sip_user, s_config.sip_domain);
+            }
+
+            sip_config_t sip_cfg = {
+                .uri = sip_uri,
+                .event_handler = sip_event_handler,
+                .acodec_type = SIP_ACODEC_G711U,
+            };
+
+            s_sip_handle = esp_sip_init(&sip_cfg);
+            if (s_sip_handle) {
+                esp_sip_start(s_sip_handle);
+                ESP_LOGI(TAG, "SIP client started for %s", user);
+            } else {
+                ESP_LOGE(TAG, "Failed to initialize SIP");
+            }
+        }
     }
 }
 
@@ -107,8 +171,23 @@ static void wifi_start_softap(void) {
 }
 
 static void sip_place_call(const char *number) {
-    // Placeholder for actual SIP call initiation using ESP-ADF or PJSIP.
-    ESP_LOGI(TAG, "Dialing %s via SIP user %s@%s", number, s_config.sip_user, s_config.sip_domain);
+    if (!s_sip_handle) {
+        ESP_LOGW(TAG, "SIP handle not ready; cannot place call to %s", number);
+        return;
+    }
+    if (!s_sip_registered) {
+        ESP_LOGW(TAG, "SIP not registered; cannot place call to %s", number);
+        return;
+    }
+
+    char target[128];
+    if (s_config.sip_domain[0]) {
+        snprintf(target, sizeof(target), "sip:%s@%s", number, s_config.sip_domain);
+    } else {
+        strlcpy(target, number, sizeof(target));
+    }
+    ESP_LOGI(TAG, "Dialing %s via SIP user %s@%s", target, s_config.sip_user, s_config.sip_domain);
+    esp_sip_uac_invite(s_sip_handle, target);
 }
 
 static void rotary_timeout(void *arg) {
@@ -234,6 +313,12 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     parse_field(buf, "sip_domain", s_config.sip_domain, sizeof(s_config.sip_domain));
     parse_field(buf, "sip_extension", s_config.sip_extension, sizeof(s_config.sip_extension));
     save_config();
+    if (s_sip_handle) {
+        esp_sip_stop(s_sip_handle);
+        esp_sip_destroy(s_sip_handle);
+        s_sip_handle = NULL;
+        s_sip_registered = false;
+    }
     wifi_start_sta();
     httpd_resp_set_hdr(req, "Location", "/");
     httpd_resp_set_status(req, "303 See Other");
