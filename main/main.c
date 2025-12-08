@@ -118,17 +118,26 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
             char sip_uri[196];
             const char *user = s_config.sip_extension[0] ? s_config.sip_extension : s_config.sip_user;
             if (s_config.sip_pass[0]) {
-                snprintf(sip_uri, sizeof(sip_uri), "sip://%s:%s@%s", s_config.sip_user, s_config.sip_pass, s_config.sip_domain);
+                snprintf(sip_uri, sizeof(sip_uri), "sip://%s:%s@%s", user, s_config.sip_pass, s_config.sip_domain);
             } else {
-                snprintf(sip_uri, sizeof(sip_uri), "sip://%s@%s", s_config.sip_user, s_config.sip_domain);
+                snprintf(sip_uri, sizeof(sip_uri), "sip://%s@%s", user, s_config.sip_domain);
             }
 
             esp_rtc_config_t rtc_cfg = {
                 .ctx = NULL,
+                .local_addr = NULL,
                 .uri = sip_uri,
                 .acodec_type = RTC_ACODEC_G711U,
+                .vcodec_info = NULL,
                 .data_cb = NULL,
                 .event_handler = rtc_event_handler,
+                .use_public_addr = true,
+                .send_options = true,
+                .keepalive = 30,
+                .crt_bundle_attach = NULL,
+                .register_interval = 600,
+                .user_agent = "Rotary SIP",
+                .fixed_local_port = 0,
             };
 
             s_rtc_handle = esp_rtc_service_init(&rtc_cfg);
