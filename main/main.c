@@ -293,6 +293,19 @@ static void restart_task(void *param) {
     esp_restart();
 }
 
+static int hex_to_int(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'A' && c <= 'F') {
+        return 10 + (c - 'A');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return 10 + (c - 'a');
+    }
+    return -1;
+}
+
 static void parse_field(const char *body, const char *key, char *out, size_t out_len) {
     char needle[32];
     snprintf(needle, sizeof(needle), "%s=", key);
@@ -306,11 +319,26 @@ static void parse_field(const char *body, const char *key, char *out, size_t out
     if (len >= out_len) {
         len = out_len - 1;
     }
-    // simple URL decode for '+' to space; ignores % encoding for brevity
-    for (size_t i = 0; i < len; ++i) {
-        out[i] = start[i] == '+' ? ' ' : start[i];
+
+    // URL decode + to space and %XX hex encoding
+    size_t out_pos = 0;
+    for (size_t i = 0; i < len && out_pos < out_len - 1; ++i) {
+        if (start[i] == '+') {
+            out[out_pos++] = ' ';
+        } else if (start[i] == '%' && i + 2 < len) {
+            int hi = hex_to_int(start[i + 1]);
+            int lo = hex_to_int(start[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out[out_pos++] = (char)((hi << 4) | lo);
+                i += 2;
+            } else {
+                out[out_pos++] = start[i];
+            }
+        } else {
+            out[out_pos++] = start[i];
+        }
     }
-    out[len] = '\0';
+    out[out_pos] = '\0';
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req) {
