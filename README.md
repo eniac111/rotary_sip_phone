@@ -17,6 +17,10 @@ Firmware skeleton for embedding an ESP32-ADF inside a rotary phone to operate as
    source export.sh
    ```
    Ensure `IDF_PATH` points to the cloned directory (for example, `/workspace/esp-idf`).
+   
+   > **Troubleshooting build errors**
+   > * If `idf.py set-target` fails with `components/heap/tlsf/include is not a directory`, the ESP-IDF clone is incomplete. Run `git submodule update --init --recursive` inside your `esp-idf` clone, or reclone with `--recursive` to pull TLSF and other bundled components.
+   > * Avoid pointing `IDF_PATH` at the `esp-adf/esp-idf` directory that ships inside ESP-ADF; it omits several submodules needed by this project. Use a full ESP-IDF clone (v5.x or v6.x) instead.
 2. From this repository root, run:
    ```bash
    idf.py set-target esp32
