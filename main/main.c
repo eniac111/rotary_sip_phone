@@ -101,6 +101,8 @@ static void event_handler(void *arg, esp_event_base_t event_base, int32_t event_
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *disc = (const wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGW(TAG, "Station disconnected (reason=%d), retrying", disc->reason);
         esp_wifi_connect();
         xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         if (s_rtc_handle) {
@@ -162,6 +164,10 @@ static void wifi_start_sta(void) {
     wifi_config_t wifi_config = { 0 };
     strlcpy((char *)wifi_config.sta.ssid, s_config.wifi_ssid, sizeof(wifi_config.sta.ssid));
     strlcpy((char *)wifi_config.sta.password, s_config.wifi_pass, sizeof(wifi_config.sta.password));
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+    wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 
     esp_err_t stop_ret = esp_wifi_stop();
     if (stop_ret != ESP_ERR_WIFI_NOT_INIT && stop_ret != ESP_ERR_WIFI_NOT_STARTED) {
@@ -281,6 +287,25 @@ static void send_form(httpd_req_t *req) {
     httpd_resp_send(req, buffer, HTTPD_RESP_USE_STRLEN);
 }
 
+static void restart_task(void *param) {
+    (void)param;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+}
+
+static int hex_to_int(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'A' && c <= 'F') {
+        return 10 + (c - 'A');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return 10 + (c - 'a');
+    }
+    return -1;
+}
+
 static void parse_field(const char *body, const char *key, char *out, size_t out_len) {
     char needle[32];
     snprintf(needle, sizeof(needle), "%s=", key);
@@ -294,11 +319,26 @@ static void parse_field(const char *body, const char *key, char *out, size_t out
     if (len >= out_len) {
         len = out_len - 1;
     }
-    // simple URL decode for '+' to space; ignores % encoding for brevity
-    for (size_t i = 0; i < len; ++i) {
-        out[i] = start[i] == '+' ? ' ' : start[i];
+
+    // URL decode + to space and %XX hex encoding
+    size_t out_pos = 0;
+    for (size_t i = 0; i < len && out_pos < out_len - 1; ++i) {
+        if (start[i] == '+') {
+            out[out_pos++] = ' ';
+        } else if (start[i] == '%' && i + 2 < len) {
+            int hi = hex_to_int(start[i + 1]);
+            int lo = hex_to_int(start[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out[out_pos++] = (char)((hi << 4) | lo);
+                i += 2;
+            } else {
+                out[out_pos++] = start[i];
+            }
+        } else {
+            out[out_pos++] = start[i];
+        }
     }
-    out[len] = '\0';
+    out[out_pos] = '\0';
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req) {
@@ -334,10 +374,17 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         s_rtc_handle = NULL;
         s_sip_registered = false;
     }
-    wifi_start_sta();
-    httpd_resp_set_hdr(req, "Location", "/");
-    httpd_resp_set_status(req, "303 See Other");
-    httpd_resp_send(req, "", 0);
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "Configuration saved. Rebooting to apply settings...\n");
+
+    xTaskCreate(
+        restart_task,
+        "restart_task",
+        2048,
+        NULL,
+        tskIDLE_PRIORITY,
+        NULL);
     return ESP_OK;
 }
 
